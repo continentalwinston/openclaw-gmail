@@ -355,39 +355,98 @@ export const gmailPlugin: ChannelPlugin<ResolvedGmailAccount> = {
     },
   },
   actions: {
-    listActions: () => ["send"],
-    supportsAction: ({ action }: { action: string }) => action === "send",
+    listActions: () => ["send", "search", "read", "read-thread"],
+    supportsAction: ({ action }: { action: string }) => ["send", "search", "read", "read-thread"].includes(action),
     handleAction: async (ctx: any) => {
-      if (ctx.action !== "send") return { ok: false, error: new Error(`Unsupported action: ${ctx.action}`) };
-
-      const { params, accountId, cfg, toolContext } = ctx;
+      const { action, params, accountId, cfg, toolContext } = ctx;
       const account = resolveGmailAccount(cfg, accountId);
       const emailKey = account.email?.toLowerCase();
       const client = (emailKey && activeClients.get(emailKey)) || createGmailClient(account, cfg);
 
-      const to = (params.target || params.to) as string;
-      const text = params.message as string;
+      if (action === "send") {
+        const to = (params.target || params.to) as string;
+        const text = params.message as string;
 
-      const isThread = isGmailThreadId(to);
-      let subject = params.subject as string | undefined;
-      let replyToId: string | undefined;
+        const isThread = isGmailThreadId(to);
+        let subject = params.subject as string | undefined;
+        let replyToId: string | undefined;
 
-      if (isThread && toolContext?.currentThreadTs) {
-          replyToId = toolContext.currentThreadTs;
+        if (isThread && toolContext?.currentThreadTs) {
+            replyToId = toolContext.currentThreadTs;
+        }
+
+        await sendGmailText({
+          to,
+          text,
+          accountId,
+          cfg,
+          threadId: isThread ? to : undefined,
+          replyToId,
+          subject,
+          client,
+        });
+
+        return { ok: true, content: [{ type: "text", text: "Message sent via Gmail." }] };
       }
 
-      await sendGmailText({
-        to,
-        text,
-        accountId,
-        cfg,
-        threadId: isThread ? to : undefined,
-        replyToId,
-        subject,
-        client,
-      });
+      if (action === "search") {
+        const query = (params.query || params.message || "in:inbox") as string;
+        const limit = (params.limit || 10) as number;
+        const results = await client.searchMessages(query, { maxResults: limit, includeBody: true });
 
-      return { ok: true, content: [{ type: "text", text: "Message sent via Gmail." }] };
+        if (results.length === 0) {
+          return { ok: true, content: [{ type: "text", text: `No emails found for query: "${query}"` }] };
+        }
+
+        const formatted = results.map((msg, i) => {
+          const bodyPreview = msg.body?.substring(0, 300) || "(no body)";
+          return `**${i + 1}. ${msg.subject || "(no subject)"}**\n` +
+                 `   From: ${msg.from}\n` +
+                 `   Date: ${msg.date}\n` +
+                 `   Thread: ${msg.threadId} | Message: ${msg.id}\n` +
+                 `   Labels: ${msg.labels?.join(", ") || "none"}\n` +
+                 `   Preview: ${bodyPreview}${msg.body && msg.body.length > 300 ? "..." : ""}`;
+        }).join("\n\n");
+
+        return { ok: true, content: [{ type: "text", text: `Found ${results.length} email(s) for "${query}":\n\n${formatted}` }] };
+      }
+
+      if (action === "read") {
+        const messageId = (params.messageId || params.message_id || params.target) as string;
+        if (!messageId) {
+          return { ok: false, error: new Error("read action requires a messageId parameter") };
+        }
+        const raw = await client.getMessage(messageId);
+        if (!raw) {
+          return { ok: false, error: new Error(`Message ${messageId} not found`) };
+        }
+        return { ok: true, content: [{ type: "text", text: JSON.stringify(raw, null, 2) }] };
+      }
+
+      if (action === "read-thread") {
+        const threadId = (params.threadId || params.thread_id || params.target) as string;
+        if (!threadId) {
+          return { ok: false, error: new Error("read-thread action requires a threadId parameter") };
+        }
+        const thread = await client.getThread(threadId, { full: true });
+        if (!thread) {
+          return { ok: false, error: new Error(`Thread ${threadId} not found`) };
+        }
+
+        const formatted = thread.messages.map((msg, i) => {
+          const bodyPreview = msg.body?.substring(0, 500) || "(no body)";
+          return `**Message ${i + 1}** (${msg.id})\n` +
+                 `   From: ${msg.from}\n` +
+                 `   To: ${msg.to || "?"}\n` +
+                 `   Date: ${msg.date}\n` +
+                 `   Subject: ${msg.subject}\n` +
+                 `   Body:\n${bodyPreview}${msg.body && msg.body.length > 500 ? "..." : ""}`;
+        }).join("\n\n---\n\n");
+
+        return { ok: true, content: [{ type: "text", text: `Thread ${threadId} (${thread.messages.length} messages):\n\n${formatted}` }] };
+      }
+
+      return { ok: false, error: new Error(`Unsupported action: ${action}`) };
     },
   },
   gateway: {
