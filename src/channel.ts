@@ -278,7 +278,7 @@ export const gmailPlugin: ChannelPlugin<ResolvedGmailAccount> = {
       const text = [ctx.text, ctx.mediaUrl].filter(Boolean).join("\n\n");
       return sendGmailText({ ...ctx, text, client });
     },
-    resolveTarget: ({ to, allowFrom }) => {
+    resolveTarget: ({ to, allowFrom, cfg, accountId }: any) => {
       const trimmed = to?.trim() ?? "";
       const normalized = normalizeGmailTarget(trimmed);
 
@@ -295,21 +295,27 @@ export const gmailPlugin: ChannelPlugin<ResolvedGmailAccount> = {
         return { ok: true, to: normalized };
       }
 
-      // Security: check allowFrom for new email addresses
-      const allowed = (allowFrom || []).map((e) => String(e).trim());
+      // Security: check allowOutboundTo first (dedicated outbound list),
+      // then fall back to allowFrom for backwards compatibility.
+      const account = cfg ? resolveGmailAccount(cfg, accountId) : null;
+      const gmailCfg = cfg?.channels?.["openclaw-gmail"] as any;
+      const accountCfg = gmailCfg?.accounts?.[account?.email ?? ""] ?? gmailCfg?.accounts?.["default"];
+      const outboundList = accountCfg?.allowOutboundTo ?? gmailCfg?.defaults?.allowOutboundTo;
+      const allowed = (outboundList || allowFrom || []).map((e: string) => String(e).trim());
+
       if (allowed.includes("*")) {
         return { ok: true, to: normalized };
       }
-      
+
       if (allowed.length > 0) {
-        const isAllowed = allowed.some(entry => {
+        const isAllowed = allowed.some((entry: string) => {
           if (entry === normalized) return true;
           if (entry.startsWith("@") && normalized.endsWith(entry)) return true;
           return false;
         });
-        
+
         if (!isAllowed) {
-          return { ok: false, error: new Error(`Recipient ${normalized} not in allowList`) };
+          return { ok: false, error: new Error(`Recipient ${normalized} not in allowed outbound list`) };
         }
       }
 
